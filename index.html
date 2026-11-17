@@ -20,7 +20,7 @@ button:active{transform:scale(.95)}
 .tabs button{flex:1}
 .tabs button.on{background:var(--red);border-color:var(--red);color:#fff}
 .stage{background:#0b1022;border:1px solid var(--line);border-radius:12px;overflow:hidden}
-canvas{display:block;width:100%;height:auto}
+canvas{display:block;width:100%;height:auto;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .hint{font-size:13px;line-height:1.5;color:var(--sub);margin:8px 2px 12px;min-height:1.5em}
 .row{display:flex;gap:8px;margin:0 0 10px}
 .row>button,.row>label,.row>a{flex:1}
@@ -55,7 +55,6 @@ label select{flex:1;min-width:0;padding:0 8px}
 <section id="paneSa">
   <div class="row"><button id="saLabel">連の札</button><button id="saUndo">戻す</button><button id="saClear">全部消す</button></div>
   <div class="row">
-    <label>日の数<select id="saDays"><option value="3">3日</option><option value="2">2日</option><option value="1">本日だけ</option></select></label>
     <label>幅<select id="saRange"><option value="3000">±3000</option><option value="6000">±6000</option><option value="10000">±10000</option><option value="20000">±20000</option></select></label>
   </div>
 </section>
@@ -95,20 +94,26 @@ const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
 const FONT = '"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP","Yu Gothic",system-ui,sans-serif';
 const BG = '#0b1022';
-const DAY = {d2: {name: '2日前', color: '#7bd84a'}, d1: {name: '1日前', color: '#f2cf1d'}, d0: {name: '本日', color: '#ff4d4d'}};
+const TODAY = '#ff4d4d';
 const TYPE_COLOR = {AT: '#8a5cf6', CZ: '#2f7bea', BIG: '#e5484d', REG: '#22a065'};
 const OTHER_COLOR = '#e8862a', CUR_COLOR = '#56627e';
 const KEY = 'nerai-graph-v1';
 
 // 作りかけはこの端末だけに残す（外には送らない）
 function fresh() {
-  return {tab: 'sa', sa: {days: 3, range: 6000, pts: {d2: [], d1: [], d0: []}, labels: []},
+  return {tab: 'sa', sa: {range: 3000, pts: [], labels: []},
           ri: {max: 1000, cur: null, list: [], arrows: [], other: 'ART'}};
 }
 let S = fresh();
 try {
   const t = JSON.parse(localStorage.getItem(KEY) || 'null');
-  if (t && t.sa && t.ri) { S.tab = t.tab === 'ri' ? 'ri' : 'sa'; Object.assign(S.sa, t.sa); Object.assign(S.ri, t.ri); }
+  if (t && t.sa && t.ri) {
+    S.tab = t.tab === 'ri' ? 'ri' : 'sa'; Object.assign(S.ri, t.ri);
+    // 版1は3日分を持っていた。本日の分だけ引きつぐ
+    S.sa.range = +t.sa.range || 3000;
+    S.sa.pts = Array.isArray(t.sa.pts) ? t.sa.pts : (t.sa.pts && t.sa.pts.d0) || [];
+    S.sa.labels = (t.sa.labels || []).filter(l => !l.day || l.day === 'd0');
+  }
 } catch (_) {}
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (_) {} }
 
@@ -120,13 +125,13 @@ function undo() {
   S[k] = JSON.parse(hist[k].pop()); sel = null; arrowMode = 0; labelMode = false; changed();
 }
 
-let sel = null, arrowMode = 0, arrowStart = -1, labelMode = false, num = '', drag = null, saHits = [], riHits = [], outFile = null;
+let sel = null, arrowMode = 0, arrowStart = -1, labelMode = false, num = '', drag = null, saHits = [], riHits = [], outFile = null, ghost = null;
 
 function changed() { save(); render(); sync(); }
 function setHint(t) { $('hint').textContent = t; }
 function defaultHint() {
   setHint(S.tab === 'sa'
-    ? 'グラフをタップ＝点を置く　点を引っぱる＝動かす　枠の外へ引っぱる＝消す'
+    ? '指でおさえて、ずらして、離した所に点が置かれます。まちがえたら「戻す」'
     : '数字を打って種類を押す＝棒が1本ふえる（左が新しい）　棒をタップ＝選んで書きかえ');
 }
 function toHalf(s) { return String(s).replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).trim(); }
@@ -151,29 +156,25 @@ function pos(e) {
 }
 function render(exp) { if (S.tab === 'sa') drawSa(!!exp); else drawRi(!!exp); }
 
-// ---- 差枚グラフ ----
-const SA = {W: 1200, H: 800, L: 24, R: 1030, T: 110, B: 770};
-function dayKeys() { return S.sa.days == 3 ? ['d2', 'd1', 'd0'] : S.sa.days == 2 ? ['d1', 'd0'] : ['d0']; }
-function secW() { return (SA.R - SA.L) / dayKeys().length; }
-function secX(d) { return SA.L + dayKeys().indexOf(d) * secW(); }
+// ---- 差枚グラフ（本日だけ） ----
+const SA = {W: 1200, H: 1000, L: 24, R: 1030, T: 100, B: 970};
 function vToY(v) { const r = S.sa.range; return SA.T + (SA.B - SA.T) * (r - v) / (2 * r); }
 function yToV(y) {
   const r = S.sa.range, v = Math.round((r - (y - SA.T) / (SA.B - SA.T) * 2 * r) / 50) * 50;
   return Math.max(-r, Math.min(r, v));
 }
-function dayAt(x) { const k = dayKeys(); return k[Math.max(0, Math.min(k.length - 1, Math.floor((x - SA.L) / secW())))]; }
-function fAt(d, x) { return Math.max(0, Math.min(1, (x - secX(d)) / secW())); }
+function fToX(f) { return SA.L + f * (SA.R - SA.L); }
+function xToF(x) { return Math.max(0, Math.min(1, (x - SA.L) / (SA.R - SA.L))); }
+function lastF() { const p = S.sa.pts; return p.length ? p[p.length - 1].f : 0; }
 
 function drawSa(exp) {
   cv.width = SA.W; cv.height = SA.H;
   ctx.fillStyle = BG; ctx.fillRect(0, 0, SA.W, SA.H);
-  const keys = dayKeys(), w = secW(), r = S.sa.range, step = r <= 3000 ? 1000 : r <= 6000 ? 3000 : 5000;
-  ctx.textBaseline = 'middle';
-  ctx.font = 'bold 40px ' + FONT; ctx.textAlign = 'left';
-  const items = keys.map(k => '― ' + DAY[k].name + ' ―'), ws = items.map(t => ctx.measureText(t).width);
-  let x = (SA.W - ws.reduce((a, b) => a + b, 0) - 56 * (items.length - 1)) / 2;
-  keys.forEach((k, i) => { ctx.fillStyle = DAY[k].color; ctx.fillText(items[i], x, 52); x += ws[i] + 56; });
-  ctx.font = 'bold 34px ' + FONT;
+  const r = S.sa.range, step = r <= 3000 ? 1000 : r <= 6000 ? 3000 : 5000, cxm = (SA.L + SA.R) / 2;
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  if (!exp && ghost) { ctx.font = 'bold 50px ' + FONT; ctx.fillStyle = '#fff'; ctx.fillText(fmtV(ghost.v) + '枚', cxm, 48); }
+  else { ctx.font = 'bold 40px ' + FONT; ctx.fillStyle = TODAY; ctx.fillText('― 本日 ―', cxm, 48); }
+  ctx.textAlign = 'left'; ctx.font = 'bold 34px ' + FONT;
   for (let v = -r; v <= r; v += step) {
     const y = vToY(v);
     ctx.save();
@@ -183,110 +184,95 @@ function drawSa(exp) {
     ctx.restore();
     ctx.fillStyle = '#fff'; ctx.fillText(String(v), SA.R + 16, y);
   }
-  for (let i = 1; i < keys.length; i++) {
-    const xs = SA.L + i * w, today = keys[i] === 'd0';
-    ctx.strokeStyle = today ? '#ff3b3b' : 'rgba(255,255,255,.22)'; ctx.lineWidth = today ? 4 : 2;
-    ctx.beginPath(); ctx.moveTo(xs, SA.T - 12); ctx.lineTo(xs, SA.B + 12); ctx.stroke();
-  }
-  ctx.save();
-  ctx.beginPath(); ctx.rect(SA.L, SA.T - 6, SA.R - SA.L, SA.B - SA.T + 12); ctx.clip();
-  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = 7;
-  keys.forEach(k => {
-    const p = S.sa.pts[k]; if (!p.length) return;
-    const x0 = secX(k);
-    ctx.strokeStyle = DAY[k].color; ctx.beginPath(); ctx.moveTo(x0, vToY(0));
-    p.forEach(q => ctx.lineTo(x0 + q.f * w, vToY(q.v)));
+  const line = ghost && !ghost.label ? S.sa.pts.concat([ghost]) : S.sa.pts;
+  if (line.length) {
+    ctx.save();
+    ctx.beginPath(); ctx.rect(SA.L, SA.T - 6, SA.R - SA.L, SA.B - SA.T + 12); ctx.clip();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = 7; ctx.strokeStyle = TODAY;
+    ctx.beginPath(); ctx.moveTo(fToX(0), vToY(0));
+    line.forEach(q => ctx.lineTo(fToX(q.f), vToY(q.v)));
     ctx.stroke();
-  });
-  ctx.restore();
-  if (!exp) keys.forEach(k => {
-    const x0 = secX(k);
-    S.sa.pts[k].forEach(q => {
-      ctx.beginPath(); ctx.arc(x0 + q.f * w, vToY(q.v), 11, 0, Math.PI * 2);
-      ctx.fillStyle = DAY[k].color; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = '#fff'; ctx.stroke();
-    });
+    ctx.restore();
+  }
+  if (!exp) S.sa.pts.forEach(q => {
+    ctx.beginPath(); ctx.arc(fToX(q.f), vToY(q.v), 9, 0, Math.PI * 2);
+    ctx.fillStyle = TODAY; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke();
   });
   saHits = [];
   ctx.font = 'bold 46px ' + FONT; ctx.textAlign = 'center';
   S.sa.labels.forEach((lb, i) => {
-    if (!keys.includes(lb.day)) return;
-    const lx = secX(lb.day) + lb.f * w, ly = vToY(lb.v), tw = ctx.measureText(lb.text).width;
+    const lx = fToX(lb.f), ly = vToY(lb.v), tw = ctx.measureText(lb.text).width;
     outlined(lb.text, lx, ly, '#fff');
     saHits.push({i, x1: lx - tw / 2 - 14, x2: lx + tw / 2 + 14, y1: ly - 36, y2: ly + 36});
   });
-  if (!exp && keys.every(k => !S.sa.pts[k].length) && !S.sa.labels.length) {
+  if (!exp && ghost) {
+    const gx = fToX(ghost.f), gy = vToY(ghost.v);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 2; ctx.setLineDash([8, 8]);
+    ctx.beginPath(); ctx.moveTo(SA.L, gy); ctx.lineTo(SA.R, gy); ctx.moveTo(gx, SA.T); ctx.lineTo(gx, SA.B); ctx.stroke();
+    ctx.restore();
+    if (ghost.label) outlined('○連', gx, gy, '#fff');
+    else { ctx.beginPath(); ctx.arc(gx, gy, 16, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); }
+  }
+  if (!exp && !ghost && !S.sa.pts.length && !S.sa.labels.length) {
     ctx.font = 'bold 40px ' + FONT; ctx.fillStyle = 'rgba(255,255,255,.7)';
-    ctx.fillText('ここをタップして線を描く', (SA.L + SA.R) / 2, vToY(0) - 80);
+    ctx.fillText('指でおさえて、ずらして、離す', cxm, vToY(0) - 80);
   }
 }
 
+// 指を置くと点が指についてくる。離した所に決まる（線はいつも右へのびる）
+function setGhost(p) {
+  ghost = labelMode ? {f: xToF(p.x), v: yToV(p.y), label: true} : {f: Math.max(lastF(), xToF(p.x)), v: yToV(p.y)};
+}
 function saDown(e) {
-  const p = pos(e); let t = null;
-  for (let j = saHits.length - 1; j >= 0 && !t; j--) {
+  const p = pos(e); let lb = null;
+  for (let j = saHits.length - 1; j >= 0 && !lb; j--) {
     const h = saHits[j];
-    if (p.x >= h.x1 && p.x <= h.x2 && p.y >= h.y1 && p.y <= h.y2) t = {kind: 'lb', obj: S.sa.labels[h.i]};
+    if (p.x >= h.x1 && p.x <= h.x2 && p.y >= h.y1 && p.y <= h.y2) lb = S.sa.labels[h.i];
   }
-  if (!t && !labelMode) {
-    let best = 16 * p.k; const w = secW();
-    dayKeys().forEach(k => {
-      const x0 = secX(k);
-      S.sa.pts[k].forEach(q => {
-        const d = Math.hypot(x0 + q.f * w - p.x, vToY(q.v) - p.y);
-        if (d < best) { best = d; t = {kind: 'pt', day: k, obj: q}; }
-      });
-    });
-  }
-  drag = {t, x: p.x, y: p.y, k: p.k, moved: false, ly: p.y};
+  drag = {lb, x: p.x, y: p.y, k: p.k, moved: false, ly: p.y};
+  if (!lb) setGhost(p);
   try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  render();
 }
 function outside(y) { return y > SA.B + 25 || y < SA.T - 25; }
 function saMove(e) {
   if (!drag) return;
   const p = pos(e);
   drag.ly = p.y;
+  if (!drag.lb) { setGhost(p); render(); return; }
   if (!drag.moved) {
     if (Math.hypot(p.x - drag.x, p.y - drag.y) < 8 * drag.k) return;
-    drag.moved = true; if (drag.t) snap();
+    drag.moved = true; snap();
   }
-  const t = drag.t; if (!t) return;
-  const v = yToV(p.y);
-  if (t.kind === 'lb') { const d = dayAt(p.x); t.obj.day = d; t.obj.f = fAt(d, p.x); t.obj.v = v; }
-  else {
-    t.obj.f = fAt(t.day, p.x); t.obj.v = v;
-    S.sa.pts[t.day].sort((a, b) => a.f - b.f);
-  }
-  setHint(outside(p.y) ? 'ここで離すと消えます' : t.kind === 'pt' ? DAY[t.day].name + '　' + fmtV(v) + '枚' : '');
+  drag.lb.f = xToF(p.x); drag.lb.v = yToV(p.y);
+  setHint(outside(p.y) ? 'ここで離すと消えます' : '');
   render();
 }
 function saUp() {
-  const d = drag; drag = null;
+  const d = drag, g = ghost; drag = null; ghost = null;
   if (!d) return;
-  const t = d.t;
-  if (d.moved) {
-    if (!t) return;
-    if (outside(d.ly)) {
-      const a = t.kind === 'lb' ? S.sa.labels : S.sa.pts[t.day];
-      a.splice(a.indexOf(t.obj), 1);
-      setHint('消しました（「戻す」で元どおり）');
+  if (d.lb) {
+    if (d.moved) {
+      if (outside(d.ly)) { S.sa.labels.splice(S.sa.labels.indexOf(d.lb), 1); setHint('札を消しました（「戻す」で元どおり）'); }
+      else defaultHint();
+      changed(); return;
     }
-    changed(); return;
-  }
-  if (t && t.kind === 'lb') {
-    const s = prompt('札の字（空にすると消えます）', t.obj.text);
-    if (s === null) return;
+    const s = prompt('札の字（空にすると消えます）', d.lb.text);
+    if (s === null) { render(); return; }
     snap();
-    if (!toHalf(s)) S.sa.labels.splice(S.sa.labels.indexOf(t.obj), 1); else t.obj.text = normLabel(s);
+    if (!toHalf(s)) S.sa.labels.splice(S.sa.labels.indexOf(d.lb), 1); else d.lb.text = normLabel(s);
     changed(); return;
   }
-  if (d.y < SA.T - 40 || d.y > SA.B + 40 || d.x < SA.L || d.x > SA.R) return;
-  const day = dayAt(d.x), f = fAt(day, d.x), v = yToV(d.y);
-  if (labelMode) {
-    labelMode = false; const s = askLabel('5');
-    if (s) { snap(); S.sa.labels.push({day, f, v, text: s}); }
+  if (!g) { render(); return; }
+  if (g.label) {
+    labelMode = false; render();
+    const s = askLabel('5');
+    if (s) { snap(); S.sa.labels.push({f: g.f, v: g.v, text: s}); }
     defaultHint(); changed(); return;
   }
-  snap(); const a = S.sa.pts[day]; a.push({f, v}); a.sort((m, n) => m.f - n.f);
-  setHint(DAY[day].name + '　' + fmtV(v) + '枚'); changed();
+  snap(); S.sa.pts.push({f: g.f, v: g.v});
+  setHint('本日　' + fmtV(g.v) + '枚（まちがえたら「戻す」）'); changed();
 }
 
 // ---- 当選履歴 ----
@@ -439,7 +425,7 @@ function sync() {
   $('paneSa').hidden = !sa; $('paneRi').hidden = sa;
   cv.style.touchAction = sa ? 'none' : 'manipulation';
   $('saLabel').classList.toggle('on', labelMode);
-  $('saDays').value = String(S.sa.days); $('saRange').value = String(S.sa.range); $('riMax').value = String(S.ri.max);
+  $('saRange').value = String(S.sa.range); $('riMax').value = String(S.ri.max);
   $('riArrow').classList.toggle('on', arrowMode > 0); $('riArrow').textContent = arrowMode ? '矢印をやめる' : '連の矢印';
   $('selRow').hidden = !sel; $('riIns').hidden = !(sel && sel.kind === 'e');
   $('num').textContent = num || '0';
@@ -447,7 +433,7 @@ function sync() {
 }
 function switchTab(t) {
   if (S.tab === t) return;
-  S.tab = t; sel = null; arrowMode = 0; labelMode = false; drag = null;
+  S.tab = t; sel = null; arrowMode = 0; labelMode = false; drag = null; ghost = null;
   defaultHint(); changed(); window.scrollTo(0, 0);
 }
 function stamp() {
@@ -486,13 +472,12 @@ $('saLabel').onclick = () => { labelMode = !labelMode; if (labelMode) setHint('�
 $('saUndo').onclick = undo; $('riUndo').onclick = undo;
 $('saClear').onclick = () => {
   if (!confirm('差枚グラフの線と札を全部消しますか？（「戻す」で元にもどせます）')) return;
-  snap(); S.sa.pts = {d2: [], d1: [], d0: []}; S.sa.labels = []; changed();
+  snap(); S.sa.pts = []; S.sa.labels = []; changed();
 };
 $('riClear').onclick = () => {
   if (!confirm('当選履歴を全部消しますか？（「戻す」で元にもどせます）')) return;
   snap(); S.ri.cur = null; S.ri.list = []; S.ri.arrows = []; sel = null; num = ''; changed();
 };
-$('saDays').onchange = e => { snap(); S.sa.days = +e.target.value; changed(); };
 $('saRange').onchange = e => { snap(); S.sa.range = +e.target.value; changed(); };
 $('riMax').onchange = e => { snap(); S.ri.max = +e.target.value; changed(); };
 $('riArrow').onclick = () => {
@@ -508,7 +493,7 @@ $('share').onclick = () => { if (outFile) navigator.share({files: [outFile]}).ca
 cv.addEventListener('pointerdown', e => { if (S.tab === 'sa') { e.preventDefault(); saDown(e); } });
 cv.addEventListener('pointermove', e => { if (S.tab === 'sa') saMove(e); });
 cv.addEventListener('pointerup', e => { if (S.tab === 'sa') saUp(e); });
-cv.addEventListener('pointercancel', () => { if (drag && drag.moved && drag.t) changed(); drag = null; });
+cv.addEventListener('pointercancel', () => { if (drag && drag.moved && drag.lb) changed(); drag = null; ghost = null; render(); });
 cv.addEventListener('click', e => { if (S.tab === 'ri') riTap(e); });
 
 defaultHint(); render(); sync();
